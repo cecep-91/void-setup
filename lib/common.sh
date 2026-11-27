@@ -145,11 +145,62 @@ run_in_user_session() {
     fi
     dbus_addr="$(tr '\0' '\n' < "/proc/${pid}/environ" 2>/dev/null | grep '^DBUS_SESSION_BUS_ADDRESS=' | cut -d= -f2- || true)"
     disp="$(tr '\0' '\n' < "/proc/${pid}/environ" 2>/dev/null | grep '^DISPLAY=' | cut -d= -f2- || true)"
-    su -s /bin/bash - "${TARGET_USER}" -c "
+    printf '%s\n' "$script" | su -s /bin/bash - "${TARGET_USER}" -c "
 export DISPLAY=\"${disp:-:0}\"
 export XDG_RUNTIME_DIR=\"/run/user/${TARGET_UID}\"
 export DBUS_SESSION_BUS_ADDRESS=\"${dbus_addr}\"
-${script}
+exec bash -s
+"
+}
+
+# Run xfconf configuration either inside the active XFCE session (NOIR_LIVE_SESSION=1)
+# or headlessly on a fresh TTY install via dbus-run-session (NOIR_LIVE_SESSION=0).
+run_xfconf_session() {
+    local script="$1"
+    if [ "${DRY_RUN}" = "1" ]; then
+        printf "${C_DIM}[dry-run]${C_RESET} run_xfconf_session(%s): <xfconf/session commands>\n" "${TARGET_USER}"
+        return 0
+    fi
+    local pid dbus_addr disp dbus_bin
+    pid="$(pgrep -u "${TARGET_USER}" -n xfce4-session 2>/dev/null || true)"
+    if [ -n "$pid" ]; then
+        dbus_addr="$(tr '\0' '\n' < "/proc/${pid}/environ" 2>/dev/null | grep '^DBUS_SESSION_BUS_ADDRESS=' | cut -d= -f2- || true)"
+        disp="$(tr '\0' '\n' < "/proc/${pid}/environ" 2>/dev/null | grep '^DISPLAY=' | cut -d= -f2- || true)"
+    fi
+    if [ -n "${pid:-}" ] && [ -n "${dbus_addr:-}" ]; then
+        printf '%s\n' "$script" | su -s /bin/bash - "${TARGET_USER}" -c "
+export NOIR_LIVE_SESSION=1
+export DISPLAY=\"${disp:-:0}\"
+export XDG_RUNTIME_DIR=\"/run/user/${TARGET_UID}\"
+export DBUS_SESSION_BUS_ADDRESS=\"${dbus_addr}\"
+exec bash -s
+"
+        return $?
+    fi
+
+    dbus_bin="/usr/bin/dbus-run-session"
+    if [ ! -x "$dbus_bin" ]; then
+        dbus_bin="$(command -v dbus-run-session 2>/dev/null || true)"
+    fi
+    if [ -z "$dbus_bin" ] || [ ! -x "$dbus_bin" ]; then
+        warn "dbus-run-session not found; skipping offline xfconf pre-seeding."
+        return 1
+    fi
+
+    mkdir -p "${TARGET_HOME}/.config/xfce4/xfconf/xfce-perchannel-xml"
+    chown -R "${TARGET_USER}:${TARGET_USER}" "${TARGET_HOME}/.config"
+    info "No active xfce4-session — pre-seeding xfconf XML headlessly via dbus-run-session..."
+    {
+        printf '%s\n' "$script"
+        # Wait briefly so xfconfd flushes debounced XML writes before the temporary bus exits
+        printf 'sleep 0.5\n'
+    } | su -s /bin/bash - "${TARGET_USER}" -c "
+export NOIR_LIVE_SESSION=0
+export HOME=\"${TARGET_HOME}\"
+export XDG_CONFIG_HOME=\"${TARGET_HOME}/.config\"
+export XDG_CONFIG_DIRS='/etc/xdg'
+export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+exec \"${dbus_bin}\" -- bash -s
 "
 }
 

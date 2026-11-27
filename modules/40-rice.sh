@@ -105,16 +105,18 @@ EOF
         "${TARGET_HOME}/.bashrc" "${TARGET_HOME}/.xprofile" "${TARGET_HOME}/Pictures"
 fi
 
-# Apply live XFCE settings, 3 floating top islands, shortcuts & daemons if X11 session active
+# Apply XFCE settings, 3 floating top islands & shortcuts (live or headless TTY via dbus-run-session)
 log "Applying XFCE theme, 3 floating top islands, keyboard shortcuts & daemons..."
-run_in_user_session '
-# Stop the panel first: on exit it writes every plugin setting back to xfconf and would
-# overwrite the values applied below. It is started again at the end of this block.
-xfce4-panel --quit 2>/dev/null || true
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    pgrep -u "$(id -u)" -x xfce4-panel >/dev/null || break
-    sleep 0.3
-done
+run_xfconf_session '
+if [ "${NOIR_LIVE_SESSION:-0}" = "1" ]; then
+    # Stop the panel first: on exit it writes every plugin setting back to xfconf and would
+    # overwrite the values applied below. It is started again at the end of this block.
+    xfce4-panel --quit 2>/dev/null || true
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        pgrep -u "$(id -u)" -x xfce4-panel >/dev/null || break
+        sleep 0.3
+    done
+fi
 
 # Theme, icons, cursor, font
 xfconf-query -c xsettings -p /Net/ThemeName -n -t string -s "Noir-Glass"
@@ -163,6 +165,8 @@ RIGHT_X=$(( SCR_W - 1 ))
 
 # 3 non-overlapping auto-sized floating glass top islands (Left, Dead-Center, Right).
 # bar_icon_size 20 keeps xfce4-pulseaudio-plugin horizontal ([mic][speaker], never stacked).
+# Setting /configver = 2 prevents xfce4-panel first-boot migration from wiping our 3-island XML.
+xfconf-query -c xfce4-panel -p /configver -n -t int -s 2
 xfconf-query -c xfce4-panel -p /panels -n -t int -t int -t int -s 1 -s 2 -s 3
 xfconf-query -c xfce4-panel -p /panels/dark-mode -n -t bool -s true
 
@@ -262,6 +266,21 @@ xfconf-query -c xfce4-terminal -p /misc-show-unsafe-paste-dialog -n -t bool -s f
 xfconf-query -c xfce4-terminal -p /scrolling-bar -n -t string -s "TERMINAL_SCROLLBAR_NONE"
 xfconf-query -c xfce4-terminal -p /scrolling-lines -n -t uint -s 10000
 
+# Seed /commands/custom and /xfwm4/custom from system defaults + override=true once so a fresh
+# headless install preserves Alt+Tab/Alt+F4/Print and first login never wipes custom shortcuts.
+for ns in commands xfwm4; do
+    if [ "$(xfconf-query -c xfce4-keyboard-shortcuts -p "/${ns}/custom/override" 2>/dev/null || true)" != "true" ]; then
+        while IFS= read -r prop; do
+            [ -n "$prop" ] || continue
+            case "$prop" in */startup-notify) continue ;; esac
+            val="$(xfconf-query -c xfce4-keyboard-shortcuts -p "$prop" 2>/dev/null || true)"
+            [ -n "$val" ] || continue
+            xfconf-query -c xfce4-keyboard-shortcuts -p "/${ns}/custom/${prop#/${ns}/default/}" -n -t string -s "$val"
+        done < <(xfconf-query -c xfce4-keyboard-shortcuts -p "/${ns}/default" -l 2>/dev/null || true)
+        xfconf-query -c xfce4-keyboard-shortcuts -p "/${ns}/custom/override" -n -t bool -s true
+    fi
+done
+
 # Conflict-free keyboard ergonomics
 xfconf-query -c xfce4-keyboard-shortcuts -p "/commands/custom/Super_L" -r 2>/dev/null || true
 xfconf-query -c xfce4-keyboard-shortcuts -p "/xfwm4/custom/<Primary><Alt>d" -r 2>/dev/null || true
@@ -286,24 +305,26 @@ for i in 1 2 3 4; do
     xfconf-query -c xfce4-keyboard-shortcuts -p "/xfwm4/custom/<Super>${i}" -n -t string -s "workspace_${i}_key"
 done
 
-# Restart live WM (built-in compositor), notifications, xcape, widgets, panel & desktop
-pkill -u "$(id -u)" xfce4-notifyd 2>/dev/null || true
-pkill -u "$(id -u)" dunst 2>/dev/null || true
-pkill -u "$(id -u)" picom 2>/dev/null || true
-pkill -u "$(id -u)" xcape 2>/dev/null || true
-# (never `pkill -f` a pattern that also appears in this script: it would kill this very shell)
-[ -r "${XDG_RUNTIME_DIR:-/tmp}/auto-compositor.pid" ] && kill "$(cat "${XDG_RUNTIME_DIR:-/tmp}/auto-compositor.pid")" 2>/dev/null || true
-pkill -u "$(id -u)" -x auto-compositor 2>/dev/null || true
-sleep 0.3
-nohup xfwm4 --replace >/dev/null 2>&1 </dev/null &
-sleep 1
-nohup dunst >/dev/null 2>&1 </dev/null &
-xcape -e "Super_L=Alt_L|F1"
-nohup "$HOME/.local/bin/auto-compositor.sh" >/dev/null 2>&1 </dev/null &
-"$HOME/.config/conky/start.sh"
-nohup xfce4-panel >/dev/null 2>&1 </dev/null &
-sleep 1
-xfdesktop --reload
-' || true
+if [ "${NOIR_LIVE_SESSION:-0}" = "1" ]; then
+    # Restart live WM (built-in compositor), notifications, xcape, widgets, panel & desktop
+    pkill -u "$(id -u)" xfce4-notifyd 2>/dev/null || true
+    pkill -u "$(id -u)" dunst 2>/dev/null || true
+    pkill -u "$(id -u)" picom 2>/dev/null || true
+    pkill -u "$(id -u)" xcape 2>/dev/null || true
+    # (never `pkill -f` a pattern that also appears in this script: it would kill this very shell)
+    [ -r "${XDG_RUNTIME_DIR:-/tmp}/auto-compositor.pid" ] && kill "$(cat "${XDG_RUNTIME_DIR:-/tmp}/auto-compositor.pid")" 2>/dev/null || true
+    pkill -u "$(id -u)" -x auto-compositor 2>/dev/null || true
+    sleep 0.3
+    nohup xfwm4 --replace >/dev/null 2>&1 </dev/null &
+    sleep 1
+    nohup dunst >/dev/null 2>&1 </dev/null &
+    xcape -e "Super_L=Alt_L|F1"
+    nohup "$HOME/.local/bin/auto-compositor.sh" >/dev/null 2>&1 </dev/null &
+    "$HOME/.config/conky/start.sh"
+    nohup xfce4-panel >/dev/null 2>&1 </dev/null &
+    sleep 1
+    xfdesktop --reload
+fi
+' || warn "Failed to apply Noir Glass XFCE settings."
 
 ok "Module 40 (rice) complete."

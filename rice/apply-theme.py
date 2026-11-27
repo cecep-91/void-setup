@@ -1786,10 +1786,11 @@ function conky_draw_spectrum()
     end
 
     -- Frameless 64-bar wide mirrored audio equalizer (no box!)
-    local pad_x, gap = 6, 5.5
+    local pad_x = 6
     local area_w = cw - pad_x * 2
+    local gap = math.max(1.5, math.min(5.5, (area_w / N_BARS) * 0.52))
     local base_y, max_h = ch - 26, 68
-    local bar_w = (area_w - gap * (N_BARS - 1)) / N_BARS
+    local bar_w = math.max(1.5, (area_w - gap * (N_BARS - 1)) / N_BARS)
 
     -- Tapered luminous horizon hairline
     local hline = cairo_pattern_create_linear(pad_x, base_y, cw - pad_x, base_y)
@@ -1969,6 +1970,8 @@ if [ -z "$NV_DEV" ]; then
         case "$(cat "$d/vendor" 2>/dev/null)" in
             0x8086) echo "Intel iGPU"; exit 0 ;;
             0x1002) echo "AMD GPU"; exit 0 ;;
+            0x1af4) echo "VirtIO GPU"; exit 0 ;;
+            0x1b36|0x1234) echo "VM GPU"; exit 0 ;;
         esac
     done
     echo "Integrated GPU"; exit 0
@@ -2065,6 +2068,14 @@ done
         cfg / "conky" / "start.sh",
         f"""#!/bin/sh
 export XDG_RUNTIME_DIR="${{XDG_RUNTIME_DIR:-/run/user/$(id -u)}}"
+SPEC_CONF="{home}/.config/conky/spectrum.conf"
+SCR_W=$(xrandr --current 2>/dev/null | sed -n 's/.*current \\([0-9]*\\) x [0-9]*.*/\\1/p' | head -n1)
+if [ -n "$SCR_W" ] && [ "$SCR_W" -gt 0 ] 2>/dev/null; then
+    SPEC_W=$(( SCR_W - 460 ))
+    [ "$SPEC_W" -gt 680 ] && SPEC_W=680
+    [ "$SPEC_W" -lt 320 ] && SPEC_W=320
+    sed -i -E "s/^([[:space:]]*(minimum|maximum)_width[[:space:]]*=).*/\\1 $SPEC_W,/" "$SPEC_CONF" 2>/dev/null || true
+fi
 pkill -u "$(id -u)" -x conky 2>/dev/null || true
 pkill -u "$(id -u)" -f '[c]ava_feeder.sh' 2>/dev/null || true
 pkill -u "$(id -u)" -x cava 2>/dev/null || true
@@ -2073,7 +2084,7 @@ nohup {home}/.config/conky/cava_feeder.sh >/dev/null 2>&1 </dev/null &
 sleep 0.2
 conky -q -c {home}/.config/conky/telemetry.conf  >/dev/null 2>&1 </dev/null &
 conky -q -c {home}/.config/conky/void_ascii.conf >/dev/null 2>&1 </dev/null &
-conky -q -c {home}/.config/conky/spectrum.conf   >/dev/null 2>&1 </dev/null &
+conky -q -c "$SPEC_CONF" >/dev/null 2>&1 </dev/null &
 """,
         mode=0o755,
     )
@@ -2278,10 +2289,54 @@ X-GNOME-Autostart-enabled=true
 """,
     )
     write(
+        home / ".local" / "bin" / "noir-glass-display-sync.sh",
+        f"""#!/bin/sh
+# Sync resolution-dependent panel anchors and per-output wallpapers on login & display resize.
+command -v xrandr >/dev/null 2>&1 || exit 0
+command -v xfconf-query >/dev/null 2>&1 || exit 0
+
+WALLPAPER="{a['wallpapers']['primary']['file']}"
+SCR_W=$(xrandr --current 2>/dev/null | sed -n 's/.*current \\([0-9]*\\) x [0-9]*.*/\\1/p' | head -n1)
+if [ -n "$SCR_W" ] && [ "$SCR_W" -gt 0 ] 2>/dev/null; then
+    MID_POS="p=9;x=$(( SCR_W / 2 ));y=0"
+    RIGHT_POS="p=2;x=$(( SCR_W - 1 ));y=0"
+    CUR_MID=$(xfconf-query -c xfce4-panel -p /panels/panel-2/position 2>/dev/null || true)
+    CUR_RIGHT=$(xfconf-query -c xfce4-panel -p /panels/panel-3/position 2>/dev/null || true)
+    [ "$CUR_MID" = "$MID_POS" ] || xfconf-query -c xfce4-panel -p /panels/panel-2/position -n -t string -s "$MID_POS" 2>/dev/null || true
+    [ "$CUR_RIGHT" = "$RIGHT_POS" ] || xfconf-query -c xfce4-panel -p /panels/panel-3/position -n -t string -s "$RIGHT_POS" 2>/dev/null || true
+fi
+
+RELOAD=0
+for o in $(xrandr --query 2>/dev/null | awk '/ connected/{{print $1}}'); do
+    CUR_IMG=$(xfconf-query -c xfce4-desktop -p "/backdrop/screen0/monitor${{o}}/workspace0/last-image" 2>/dev/null || true)
+    if [ -z "$CUR_IMG" ]; then
+        for w in 0 1 2 3; do
+            xfconf-query -c xfce4-desktop -p "/backdrop/screen0/monitor${{o}}/workspace${{w}}/last-image" -n -t string -s "$WALLPAPER" 2>/dev/null || true
+            xfconf-query -c xfce4-desktop -p "/backdrop/screen0/monitor${{o}}/workspace${{w}}/image-style" -n -t int -s 5 2>/dev/null || true
+        done
+        RELOAD=1
+    fi
+done
+xfconf-query -c xfce4-desktop -p /desktop-icons/style -n -t int -s 0 2>/dev/null || true
+[ "$RELOAD" = 1 ] && xfdesktop --reload 2>/dev/null || true
+""",
+        mode=0o755,
+    )
+    write(
+        cfg / "autostart" / "noir-glass-display-sync.desktop",
+        f"""[Desktop Entry]
+Type=Application
+Name=Noir Glass Display Sync
+Exec={home}/.local/bin/noir-glass-display-sync.sh
+Hidden=false
+X-GNOME-Autostart-enabled=true
+""",
+    )
+    write(
         home / ".local" / "bin" / "auto-compositor.sh",
         """#!/bin/sh
 # Event-driven XFWM4 compositor toggle (0% idle CPU): OFF while a fullscreen game has focus,
-# ON for everything else (Alt+Tab, Super+D, close). Compositing is always restored on exit.
+# ON for everything else (Alt+Tab, Super+D, close). Also re-syncs layout on screen resize.
 # shortcut: fullscreen windows with _NET_WM_BYPASS_COMPOSITOR=1 or a known game WM_CLASS; add patterns below if a game misses both.
 PIDFILE="${XDG_RUNTIME_DIR:-/tmp}/auto-compositor.pid"
 if [ -r "$PIDFILE" ] && [ "$(cat "$PIDFILE")" != "$$" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
@@ -2300,9 +2355,19 @@ pkill -u "$(id -u)" -f '[x]prop -spy -root _NET_ACTIVE_WINDOW' 2>/dev/null || tr
 STATE=$(xfconf-query -c xfwm4 -p /general/use_compositing 2>/dev/null || echo "true")
 CUR_WID=""
 SHOW_DESK="0"
+LAST_GEOM=""
 
-xprop -spy -root _NET_ACTIVE_WINDOW _NET_CLIENT_LIST_STACKING _NET_SHOWING_DESKTOP 2>/dev/null | while IFS= read -r line; do
+xprop -spy -root _NET_ACTIVE_WINDOW _NET_CLIENT_LIST_STACKING _NET_SHOWING_DESKTOP _NET_DESKTOP_GEOMETRY 2>/dev/null | while IFS= read -r line; do
     case "$line" in
+        _NET_DESKTOP_GEOMETRY*)
+            NEW_GEOM=${line#*= }
+            if [ -n "$LAST_GEOM" ] && [ "$NEW_GEOM" != "$LAST_GEOM" ]; then
+                "$HOME/.local/bin/noir-glass-display-sync.sh" >/dev/null 2>&1 &
+                "$HOME/.config/conky/start.sh" >/dev/null 2>&1 &
+            fi
+            LAST_GEOM="$NEW_GEOM"
+            continue
+            ;;
         _NET_ACTIVE_WINDOW*)
             CUR_WID=$(printf '%s' "$line" | sed -n 's/.*# \\(0x[0-9a-fA-F]*\\).*/\\1/p')
             ;;

@@ -30,6 +30,14 @@ for v in $VENDORS; do
     esac
 done
 
+# QEMU/KVM guest integration: automatic display resize & clipboard via SPICE
+if grep -qiE 'QEMU|KVM|Bochs' /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/product_name 2>/dev/null \
+    || lspci -n 2>/dev/null | grep -qE '(^|[[:space:]])(1af4|1b36):'; then
+    info "QEMU/KVM virtual machine detected — installing SPICE guest agent..."
+    xbps_install_available spice-vdagent
+    enable_service spice-vdagentd
+fi
+
 # Enable LightDM display manager
 enable_service lightdm
 
@@ -41,7 +49,7 @@ run_cmd chown -R "${TARGET_USER}:${TARGET_USER}" "${TARGET_HOME}/.config/mpv"
 log "Configuring auto-lock on lid close & suspend..."
 install_file "${REPO_ROOT}/configs/elogind/10-lock.sh" "/etc/elogind/system-sleep/10-lock.sh" 0755
 
-run_in_user_session '
+run_xfconf_session '
 xfconf-query -c xfce4-session -p /general/LockCommand -n -t string -s "dm-tool lock"
 xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/lock-screen-suspend-hibernate -n -t bool -s true
 xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/logind-handle-lid-switch -n -t bool -s false
@@ -53,6 +61,6 @@ xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-battery-slee
 xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-battery-off -n -t uint -s 15
 xfconf-query -c thunar -p /last-menubar-visible -n -t bool -s false
 xfconf-query -c xfce4-desktop -p /desktop-icons/style -n -t int -s 0
-' || true
+' || warn "Failed to apply desktop XFCE settings."
 
 ok "Module 20 (desktop) complete."
