@@ -1,0 +1,5 @@
+# Keep built-in (non-NVIDIA) PCI audio controllers and HDA codecs permanently awake
+# for zero-latency Discord/voice capture without preventing NVIDIA HDMI (0x10de) D3cold sleep.
+ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{vendor}!="0x10de", ATTR{class}=="0x0403*", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="add|bind", SUBSYSTEM=="hdaudio", ATTR{vendor_id}!="0x10de*", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="add|bind", SUBSYSTEM=="hdaudio", ATTR{vendor_id}=="0x10de*", TEST=="power/control", ATTR{power/control}="auto"

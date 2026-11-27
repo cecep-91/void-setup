@@ -1,0 +1,310 @@
+#!/usr/bin/env bash
+# thermal-profile — Instant CPU RAPL + TCC + NVIDIA clock profile switcher (CLI & Noir Glass Rofi)
+set -euo pipefail
+
+STATE_FILE="/etc/thermal-profile"
+FACTORY_FILE="/etc/thermal-profile.factory"
+GPU_CAP_MARKER="/run/thermal-profile.gpu-capped"
+DEFAULT_PROFILE="balanced"
+RAPL_DOMS="/sys/class/powercap/intel-rapl:0 /sys/class/powercap/intel-rapl-mmio:0"
+
+usage() {
+    cat <<'EOF'
+Usage: thermal-profile [COMMAND]
+
+Commands:
+  quiet       CPU 15/22W, 80°C cap, balance_power, GPU 1050 MHz (silent / battery)
+  balanced    CPU 30/45W, 92°C cap, balance_performance, GPU uncapped (default / CS2)
+  cool-game   CPU 25/30W, 85°C cap, balance_performance, GPU 1450 MHz (heavy games)
+  stock       CPU factory limits (45/115W default), 95°C cap, GPU uncapped
+  status      Show active profile and live CPU/GPU thermal state (never wakes GPU)
+  menu        Open Noir Glass Rofi profile picker
+  restore     Re-apply saved profile from /etc/thermal-profile (used on boot/resume)
+EOF
+}
+
+find_tcc_path() {
+    local c
+    for c in /sys/class/thermal/cooling_device*; do
+        if [ -r "$c/type" ] && [ "$(cat "$c/type" 2>/dev/null)" = "TCC Offset" ]; then
+            printf '%s/cur_state\n' "$c"
+            return 0
+        fi
+    done
+    return 1
+}
+
+find_nvidia_pci() {
+    local d cls
+    for d in /sys/bus/pci/devices/*; do
+        [ -r "$d/vendor" ] || continue
+        if [ "$(cat "$d/vendor" 2>/dev/null)" = "0x10de" ]; then
+            cls="$(cat "$d/class" 2>/dev/null || true)"
+            case "$cls" in
+                0x03*) printf '%s\n' "$d"; return 0 ;;
+            esac
+        fi
+    done
+    return 1
+}
+
+# Factory limits: snapshot live firmware values on the very first run of a fresh
+# machine (no saved profile yet); otherwise fall back to the common 45/115 W, TCC 5.
+FACTORY_PL1_W=45 FACTORY_PL2_W=115 FACTORY_TCC_OFF=5
+load_factory() {
+    local dom uw1 uw2 tcc_path
+    if [ ! -e "$FACTORY_FILE" ] && [ ! -e "$STATE_FILE" ]; then
+        for dom in $RAPL_DOMS; do
+            [ -r "$dom/constraint_0_power_limit_uw" ] || continue
+            uw1="$(cat "$dom/constraint_0_power_limit_uw")"
+            uw2="$(cat "$dom/constraint_1_power_limit_uw" 2>/dev/null || echo "$uw1")"
+            FACTORY_PL1_W=$(( uw1 / 1000000 )); FACTORY_PL2_W=$(( uw2 / 1000000 ))
+            break
+        done
+        if tcc_path="$(find_tcc_path)"; then FACTORY_TCC_OFF="$(cat "$tcc_path" 2>/dev/null || echo 5)"; fi
+        printf 'FACTORY_PL1_W=%s\nFACTORY_PL2_W=%s\nFACTORY_TCC_OFF=%s\n' \
+            "$FACTORY_PL1_W" "$FACTORY_PL2_W" "$FACTORY_TCC_OFF" > "$FACTORY_FILE"
+        chmod 0644 "$FACTORY_FILE"
+    elif [ -r "$FACTORY_FILE" ]; then
+        # shellcheck disable=SC1090
+        . "$FACTORY_FILE"
+    fi
+}
+
+cpu_temp_c() {
+    local z h
+    for z in /sys/class/thermal/thermal_zone*; do
+        [ "$(cat "$z/type" 2>/dev/null)" = "x86_pkg_temp" ] && { echo "$(( $(cat "$z/temp") / 1000 ))°C"; return; }
+    done
+    for h in /sys/class/hwmon/hwmon*; do
+        case "$(cat "$h/name" 2>/dev/null)" in
+            coretemp|k10temp|zenpower) [ -r "$h/temp1_input" ] && { echo "$(( $(cat "$h/temp1_input") / 1000 ))°C"; return; } ;;
+        esac
+    done
+    [ -r /sys/class/thermal/thermal_zone0/temp ] && { echo "$(( $(cat /sys/class/thermal/thermal_zone0/temp) / 1000 ))°C"; return; }
+    echo "N/A"
+}
+
+get_saved_profile() {
+    local p=""
+    if [ -r "$STATE_FILE" ]; then
+        p="$(tr -d '[:space:]' < "$STATE_FILE" 2>/dev/null || true)"
+    fi
+    case "$p" in
+        quiet|balanced|cool-game|stock) printf '%s\n' "$p" ;;
+        *) printf '%s\n' "$DEFAULT_PROFILE" ;;
+    esac
+}
+
+profile_desc() {
+    case "$1" in
+        quiet)     printf 'CPU 15/22W · 80°C cap · GPU 1050 MHz' ;;
+        balanced)  printf 'CPU 30/45W · 92°C cap · GPU uncapped' ;;
+        cool-game) printf 'CPU 25/30W · 85°C cap · GPU 1450 MHz' ;;
+        stock)     printf 'CPU 45/115W · 95°C cap · GPU uncapped' ;;
+    esac
+}
+
+notify_user() {
+    local prof="$1"
+    if [ -n "${DISPLAY:-}" ] && command -v notify-send >/dev/null 2>&1; then
+        notify-send -a "Thermal Profile" -r 9411 "Thermal: ${prof}" "$(profile_desc "$prof")" 2>/dev/null || true
+    fi
+}
+
+show_status() {
+    local prof pl1 pl2 tcc_path tcc_off tcc_cap epp cpu_t nv_pci nv_st gpu_line
+    prof="$(get_saved_profile)"
+
+    pl1="N/A"
+    pl2="N/A"
+    if [ -r /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw ]; then
+        pl1="$(( $(cat /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw) / 1000000 ))W"
+        pl2="$(( $(cat /sys/class/powercap/intel-rapl:0/constraint_1_power_limit_uw) / 1000000 ))W"
+    fi
+
+    tcc_cap="N/A"
+    if tcc_path="$(find_tcc_path)"; then
+        tcc_off="$(cat "$tcc_path" 2>/dev/null || echo 0)"
+        tcc_cap="$(( 100 - tcc_off ))°C (offset ${tcc_off})"
+    fi
+
+    epp="$(cat /sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference 2>/dev/null || echo N/A)"
+
+    cpu_t="$(cpu_temp_c)"
+
+    gpu_line="not detected"
+    if nv_pci="$(find_nvidia_pci)"; then
+        nv_st="$(cat "$nv_pci/power/runtime_status" 2>/dev/null || echo unknown)"
+        if [ "$nv_st" = "suspended" ]; then
+            if [ -f "$GPU_CAP_MARKER" ]; then
+                gpu_line="D3cold sleep (0W, cap $(cat "$GPU_CAP_MARKER") MHz armed)"
+            else
+                gpu_line="D3cold sleep (0W, uncapped)"
+            fi
+        elif command -v nvidia-smi >/dev/null 2>&1; then
+            gpu_line="$(nvidia-smi --query-gpu=temperature.gpu,power.draw,clocks.gr --format=csv,noheader 2>/dev/null | awk -F', ' '{printf "active (%s°C, %s, %s)", $1, $2, $3}')"
+            [ -f "$GPU_CAP_MARKER" ] && gpu_line="${gpu_line} [cap $(cat "$GPU_CAP_MARKER") MHz]"
+        else
+            gpu_line="active"
+        fi
+    fi
+
+    printf 'Profile : %s (%s)\n' "$prof" "$(profile_desc "$prof")"
+    printf 'CPU     : %s | PL1/PL2 %s/%s | TCC %s | EPP %s\n' "$cpu_t" "$pl1" "$pl2" "$tcc_cap" "$epp"
+    printf 'GPU     : %s\n' "$gpu_line"
+}
+
+apply_profile_root() {
+    local prof="$1"
+    local pl1_w pl2_w tcc_off epp gpu_max_mhz
+
+    case "$prof" in
+        quiet)     pl1_w=15; pl2_w=22;  tcc_off=20; epp="balance_power";       gpu_max_mhz=1050 ;;
+        balanced)  pl1_w=30; pl2_w=45;  tcc_off=8;  epp="balance_performance"; gpu_max_mhz=0    ;;
+        cool-game) pl1_w=25; pl2_w=30;  tcc_off=15; epp="balance_performance"; gpu_max_mhz=1450 ;;
+        stock)     pl1_w=0;  pl2_w=0;   tcc_off=0;  epp="balance_performance"; gpu_max_mhz=0    ;;
+        *)         printf 'thermal-profile: unknown profile: %s\n' "$prof" >&2; exit 2 ;;
+    esac
+
+    load_factory
+    # stock = this machine's own limits; every other profile is capped at them
+    if [ "$prof" = "stock" ]; then
+        pl1_w=$FACTORY_PL1_W; pl2_w=$FACTORY_PL2_W; tcc_off=$FACTORY_TCC_OFF
+    else
+        [ "$pl1_w" -gt "$FACTORY_PL1_W" ] && pl1_w=$FACTORY_PL1_W
+        [ "$pl2_w" -gt "$FACTORY_PL2_W" ] && pl2_w=$FACTORY_PL2_W
+    fi
+
+    local pl1_uw=$(( pl1_w * 1000000 ))
+    local pl2_uw=$(( pl2_w * 1000000 ))
+
+    # Keep Turbo enabled so single-core gaming boost remains responsive inside the watt/temp budget
+    if [ -w /sys/devices/system/cpu/intel_pstate/no_turbo ]; then
+        echo 0 > /sys/devices/system/cpu/intel_pstate/no_turbo
+    fi
+
+    # Enforce RAPL limits on both MSR and MMIO domains (hardware applies min of both)
+    local dom
+    for dom in $RAPL_DOMS; do
+        [ -d "$dom" ] || continue
+        [ -w "$dom/constraint_0_power_limit_uw" ] && echo "$pl1_uw" > "$dom/constraint_0_power_limit_uw" || true
+        [ -w "$dom/constraint_1_power_limit_uw" ] && echo "$pl2_uw" > "$dom/constraint_1_power_limit_uw" || true
+    done
+
+    # Hardware TCC temperature ceiling (TjMax 100°C - offset)
+    local tcc_path
+    if tcc_path="$(find_tcc_path)" && [ -w "$tcc_path" ]; then
+        echo "$tcc_off" > "$tcc_path" || true
+    fi
+
+    # Energy Performance Preference (Intel HWP / AMD P-state EPP); silently skipped if unsupported
+    local pol
+    for pol in /sys/devices/system/cpu/cpufreq/policy*/energy_performance_preference; do
+        [ -w "$pol" ] && echo "$epp" > "$pol" 2>/dev/null || true
+    done
+
+    # ACPI platform profile (many laptops expose it instead of / in addition to RAPL)
+    if [ -w /sys/firmware/acpi/platform_profile ]; then
+        local pp
+        case "$prof" in
+            quiet) pp=low-power ;; stock) pp=performance ;; *) pp=balanced ;;
+        esac
+        echo "$pp" > /sys/firmware/acpi/platform_profile 2>/dev/null || true
+    fi
+
+    # NVIDIA clock cap (some laptop VBIOSes lock -pl; -lgc works and survives D3cold sleep)
+    # Never wake a sleeping GPU unnecessarily when switching to an uncapped profile.
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        local nv_pci nv_st="unknown"
+        if nv_pci="$(find_nvidia_pci)"; then
+            nv_st="$(cat "$nv_pci/power/runtime_status" 2>/dev/null || echo unknown)"
+        fi
+        if [ "$gpu_max_mhz" -gt 0 ]; then
+            nvidia-smi -lgc "300,${gpu_max_mhz}" >/dev/null 2>&1 || true
+            printf '%s\n' "$gpu_max_mhz" > "$GPU_CAP_MARKER"
+        else
+            if [ -f "$GPU_CAP_MARKER" ] || [ "$nv_st" = "active" ]; then
+                nvidia-smi -rgc >/dev/null 2>&1 || true
+            fi
+            rm -f "$GPU_CAP_MARKER"
+        fi
+    fi
+
+    printf '%s\n' "$prof" > "$STATE_FILE"
+    chmod 0644 "$STATE_FILE"
+}
+
+open_menu() {
+    if [ "$(id -u)" -eq 0 ]; then
+        echo "thermal-profile: run 'menu' as your desktop user, not root." >&2
+        exit 1
+    fi
+    local cur chosen pick
+    cur="$(get_saved_profile)"
+
+    menu_line() {
+        local p="$1" mark=" "
+        [ "$p" = "$cur" ] && mark="●"
+        printf '%s %-10s %s\n' "$mark" "$p" "$(profile_desc "$p")"
+    }
+
+    chosen="$(
+        {
+            menu_line "balanced"
+            menu_line "cool-game"
+            menu_line "quiet"
+            menu_line "stock"
+        } | rofi -dmenu -i -p "Thermal" \
+            -theme-str 'window { width: 470px; } listview { columns: 1; lines: 4; } entry { placeholder: "Select thermal profile..."; }'
+    )" || exit 0
+
+    pick="$(printf '%s\n' "$chosen" | awk '{print ($1 == "●" ? $2 : $1)}')"
+    [ -n "$pick" ] || exit 0
+    exec "$0" "$pick"
+}
+
+CMD="${1:-}"
+if [ -z "$CMD" ]; then
+    if [ -t 1 ]; then
+        show_status
+        echo ""
+        usage
+    else
+        open_menu
+    fi
+    exit 0
+fi
+
+case "$CMD" in
+    -h|--help|help)
+        usage
+        ;;
+    status|-s)
+        show_status
+        ;;
+    menu)
+        open_menu
+        ;;
+    restore)
+        if [ "$(id -u)" -ne 0 ]; then
+            exec sudo -n /usr/local/bin/thermal-profile restore
+        fi
+        apply_profile_root "$(get_saved_profile)"
+        ;;
+    quiet|balanced|cool-game|stock)
+        if [ "$(id -u)" -ne 0 ]; then
+            sudo -n /usr/local/bin/thermal-profile "$CMD" >/dev/null
+            notify_user "$CMD"
+            show_status
+        else
+            apply_profile_root "$CMD"
+            show_status
+        fi
+        ;;
+    *)
+        printf 'thermal-profile: unknown command: %s\n' "$CMD" >&2
+        usage >&2
+        exit 2
+        ;;
+esac

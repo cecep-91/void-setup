@@ -1,0 +1,3 @@
+# Keep PCIe Wi-Fi (0x028000) and Ethernet (0x020000) controllers out of PCIe runtime suspend
+ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{class}=="0x028000", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{class}=="0x020000", TEST=="power/control", ATTR{power/control}="on"

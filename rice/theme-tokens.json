@@ -1,0 +1,70 @@
+{
+  "name": "Noir-Glass",
+  "preset": "stealth-monochrome",
+  "colors": {
+    "bg_canvas": "#0B0B0D",
+    "bg_surface": "#121215",
+    "bg_elevated": "#1A1A1F",
+    "bg_hover": "#25252C",
+    "bg_glass": "rgba(14, 16, 22, 0.78)",
+    "bg_glass_strong": "rgba(14, 16, 22, 0.82)",
+    "bg_glass_rgb": [0.055, 0.063, 0.086],
+    "text_primary": "#F3F3F5",
+    "text_secondary": "#A6A6B0",
+    "text_muted": "#6E6E78",
+    "border_subtle": "rgba(255, 255, 255, 0.09)",
+    "border_glass": "rgba(255, 255, 255, 0.18)",
+    "border_glass_rgb": [1.0, 1.0, 1.0],
+    "accent": "#E4E4EA",
+    "accent_rgb": [0.894, 0.894, 0.918],
+    "accent_soft": "rgba(228, 228, 234, 0.16)",
+    "accent_hover": "rgba(228, 228, 234, 0.24)",
+    "accent_border": "rgba(228, 228, 234, 0.42)",
+    "on_accent": "#0E0E11",
+    "selection_bg": "#4A4E5E",
+    "selection_bg_hover": "#5A5F72",
+    "selection_bg_active": "#686E82",
+    "selection_fg": "#FFFFFF",
+    "link": "#D8D8E2",
+    "status_ok": "#7FD1A0",
+    "status_warn": "#F3C57A",
+    "status_danger": "#F27474"
+  },
+  "typography": {
+    "sans": "Inter",
+    "mono": "Fira Code",
+    "ui_size": 10,
+    "mono_size": 10.5,
+    "bar_size": 9.5
+  },
+  "geometry": {
+    "radius_window": 12,
+    "radius_card": 14,
+    "radius_control": 8,
+    "radius_pill": 999,
+    "bar_height": 42,
+    "bar_icon_size": 20,
+    "dock_icon_size": 20,
+    "blur_strength": 5
+  },
+  "assets": {
+    "cursor_theme": "Bibata-Modern-Classic",
+    "cursor_size": 22,
+    "icon_theme": "Papirus-Dark",
+    "folder_color": "grey",
+    "wallpapers": {
+      "primary": {
+        "file": "/usr/share/backgrounds/noir-minimal-5k.jpg",
+        "url": "https://w.wallhaven.cc/full/md/wallhaven-mdjrqy.jpg"
+      },
+      "alt_noir_anime": {
+        "file": "/usr/share/backgrounds/noir-anime-4k.jpg",
+        "url": "https://w.wallhaven.cc/full/zm/wallhaven-zmkwmv.jpg"
+      },
+      "alt_oled_astolfo": {
+        "file": "/usr/share/backgrounds/oled-astolfo-4k.png",
+        "url": "https://w.wallhaven.cc/full/e7/wallhaven-e72kv8.png"
+      }
+    }
+  }
+}

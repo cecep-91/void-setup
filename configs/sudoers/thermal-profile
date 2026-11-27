@@ -1,0 +1,3 @@
+# Allow wheel members to switch hardware thermal profiles without a password prompt.
+# Installed as /etc/sudoers.d/zz-thermal-profile so it sorts after /etc/sudoers.d/wheel.
+%wheel ALL=(root) NOPASSWD: /usr/local/bin/thermal-profile quiet, /usr/local/bin/thermal-profile balanced, /usr/local/bin/thermal-profile cool-game, /usr/local/bin/thermal-profile stock, /usr/local/bin/thermal-profile restore
